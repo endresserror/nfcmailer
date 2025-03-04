@@ -13,8 +13,13 @@ BCC = ''  # BCC用の別宛先（必要に応じて設定）
 SUBJECT = 'Welcome To Computer Club'  # メールタイトル
 BODY = '''ここのメッセージを書いて下さい'''
 
+# 正規表現パターンを一度だけコンパイル（高速化1）
+STUDENT_NUM_PATTERN = re.compile(r'\d{2}[A-Z]{2,3}\d{3}')
 
-def create_mail(from_addr, to_addr, bcc_addr, subject, body):  # メール作成メソッド
+# SMTP接続を保持するグローバル変数（高速化2）
+smtp_connection = None
+
+def create_mail(from_addr, to_addr, bcc_addr, subject, body):
     mail = MIMEText(body)
     mail["From"] = from_addr
     mail['To'] = to_addr
@@ -23,16 +28,28 @@ def create_mail(from_addr, to_addr, bcc_addr, subject, body):  # メール作成
     mail['Date'] = formatdate()
     return mail
 
+def get_smtp_connection():
+    """SMTP接続を取得または作成する（高速化2）"""
+    global smtp_connection
+    if smtp_connection is None:
+        smtp_connection = smtplib.SMTP('smtp.gmail.com', PORT)
+        smtp_connection.ehlo()
+        smtp_connection.starttls()  # 暗号化
+        smtp_connection.ehlo()
+        smtp_connection.login(FROM, PASSWORD)  # アカウントにログイン
+    return smtp_connection
 
-def send_mail(to_addrs, mail):  # メール送信メソッド
-    smtpobj = smtplib.SMTP('smtp.gmail.com', PORT)
-    smtpobj.ehlo()
-    smtpobj.starttls()  # 暗号化
-    smtpobj.ehlo()
-    smtpobj.login(FROM, PASSWORD)  # アカウントにログイン
-    smtpobj.sendmail(FROM, to_addrs, mail.as_string())  # 作成したメールを送信
-    smtpobj.close()
-
+def send_mail(to_addrs, mail):
+    try:
+        conn = get_smtp_connection()
+        conn.sendmail(FROM, to_addrs, mail.as_string())  # 作成したメールを送信
+    except Exception as e:
+        # 接続エラーの場合、再接続を試みる
+        global smtp_connection
+        smtp_connection = None
+        print(f"SMTP error: {e}, reconnecting...")
+        conn = get_smtp_connection()
+        conn.sendmail(FROM, to_addrs, mail.as_string())
 
 def on_connect(tag):
     sys_code = 0xFE00
@@ -46,8 +63,8 @@ def on_connect(tag):
     student_num = cast(bytearray, tag.read_without_encryption([sc], [bc]))
     student_num = student_num.decode("shift_jis")
 
-    # 学籍番号を抽出（2~3文字の学科コードに対応）
-    match = re.search(r'\d{2}[A-Z]{2,3}\d{3}', student_num)
+    # 学籍番号を抽出（コンパイル済みの正規表現を使用）
+    match = STUDENT_NUM_PATTERN.search(student_num)
     if match:
         extracted_student_num = match.group(0)
         print("student number : " + extracted_student_num)
@@ -62,7 +79,14 @@ def on_connect(tag):
     else:
         print("学籍番号が見つかりません")
 
-
 if __name__ == '__main__':
-    with nfc.ContactlessFrontend("usb") as clf:
-        clf.connect(rdwr={"on-connect": on_connect})
+    try:
+        with nfc.ContactlessFrontend("usb") as clf:
+            clf.connect(rdwr={"on-connect": on_connect})
+    finally:
+        # プログラム終了時にSMTP接続を閉じる（リソース管理）
+        if smtp_connection:
+            try:
+                smtp_connection.close()
+            except:
+                pass
